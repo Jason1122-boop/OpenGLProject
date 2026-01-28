@@ -162,7 +162,7 @@ bool loadTexturedModel(const std::string& objPath,
         return false;
     }
 
-    // 載入所有材質的貼圖
+    // 載入所有材質的貼圖******
     for (size_t i = 0; i < materials.size(); ++i) {
         std::string texname = materials[i].diffuse_texname;
         std::string texturePath;
@@ -247,7 +247,7 @@ int main() {
         return -1;
     }
     
-    GLFWwindow* window = glfwCreateWindow(800, 600, "Hello OpenGL", nullptr, nullptr);
+    GLFWwindow* window = glfwCreateWindow(800, 600, "OpenGL", nullptr, nullptr);
     if (!window) {
         std::cerr << "Failed to create GLFW window\n";
         glfwTerminate();
@@ -269,7 +269,7 @@ int main() {
     std::vector<Mesh> meshes;
     std::unordered_map<int, GLuint> materialTextures;
 
-    if (!loadTexturedModel("E:/train data/TEMU2000/new/temu2000.mtl.obj", meshes, materialTextures)) {
+    if (!loadTexturedModel("C:/Users/USER/Downloads/temu2000.mtl.obj", meshes, materialTextures)) {
         std::cerr << "模型載入失敗！" << std::endl;
     }
 
