@@ -14,50 +14,173 @@
 #include "tiny_obj_loader.h"
 #define STB_IMAGE_IMPLEMENTATION
 #include "stb_image.h"
-
+#include <assimp/postprocess.h>
+#include <assimp/BaseImporter.h>
+#include <assimp/material.h>
+#include <assimp/scene.h>
+#include "../build/Dependencies/assimp/samples/SimpleTexturedDirectx11/SimpleTexturedDirectx11/ModelLoader.h"
+#include <direct.h>
+#include "../build/Dependencies/assimp/samples/SimpleAssimpViewX/ModelLoaderHelperClasses.h"
 
 
 
 //存3D點
 struct Vec3 { float x, y, z;};
 
-//OBJ讀取函式只讀頂點
-bool loadOBJ(const char* path, std::vector<float>& outVertices) {
-    std::ifstream file(path);
-    if (!file.is_open()) {
-        std::cerr << "Failed to open OBJ file: " << path << std::endl;
+//processmesh do it
+// 處理單一 Mesh
+void processMesh(aiMesh* mesh, const aiScene* scene, std::vector<Mesh>& meshes)
+{
+    std::vector<float> vertexData;
+
+    for (unsigned int i = 0; i < mesh->mNumVertices; i++)
+    {
+        // ===== Position =====
+        vertexData.push_back(mesh->mVertices[i].x);
+        vertexData.push_back(mesh->mVertices[i].y);
+        vertexData.push_back(mesh->mVertices[i].z);
+
+        // ===== UV (只取第一層) =====
+        if (mesh->mTextureCoords[0])
+        {
+            vertexData.push_back(mesh->mTextureCoords[0][i].x);
+            vertexData.push_back(mesh->mTextureCoords[0][i].y);
+        }
+        else
+        {
+            vertexData.push_back(0.0f);
+            vertexData.push_back(0.0f);
+        }
+    }
+
+    Mesh myMesh{};
+
+    glGenVertexArrays(1, &myMesh.vao);
+    glGenBuffers(1, &myMesh.vbo);
+
+    glBindVertexArray(myMesh.vao);
+    glBindBuffer(GL_ARRAY_BUFFER, myMesh.vbo);
+
+    glBufferData(
+        GL_ARRAY_BUFFER,
+        vertexData.size() * sizeof(float),
+        vertexData.data(),
+        GL_STATIC_DRAW
+    );
+
+    // layout(location = 0) -> position
+    glVertexAttribPointer(
+        0,
+        3,
+        GL_FLOAT,
+        GL_FALSE,
+        5 * sizeof(float),
+        (void*)0
+    );
+    glEnableVertexAttribArray(0);
+
+    // layout(location = 1) -> UV
+    glVertexAttribPointer(
+        1,
+        2,
+        GL_FLOAT,
+        GL_FALSE,
+        5 * sizeof(float),
+        (void*)(3 * sizeof(float))
+    );
+    glEnableVertexAttribArray(1);
+
+    glBindVertexArray(0);
+
+    myMesh.vertexCount = mesh->mNumVertices;
+    myMesh.materialID = mesh->mMaterialIndex;
+
+    meshes.push_back(myMesh);
+}
+
+// 遞迴處理 FBX 節點樹
+void processNode(aiNode* node, const aiScene* scene, std::vector<Mesh>& meshes)
+{
+    // 處理當前節點的 Mesh
+    for (unsigned int i = 0; i < node->mNumMeshes; i++)
+    {
+        aiMesh* mesh = scene->mMeshes[node->mMeshes[i]];
+        processMesh(mesh, scene, meshes);
+    }
+
+    // 遞迴處理子節點
+    for (unsigned int i = 0; i < node->mNumChildren; i++)
+    {
+        processNode(node->mChildren[i], scene, meshes);
+    }
+}
+
+
+
+//fbx讀取
+bool loadFBXModel(const std::string& path, std::vector<Mesh>& meshes, std::unordered_map<int, GLuint>& materialTextures) {
+    Assimp::Importer importer;
+    const aiScene* scene = importer.ReadFile(path, aiProcess_Triangulate | aiProcess_FlipUVs | aiProcess_GenSmoothNormals);
+
+    if (!scene || scene->mFlags & AI_SCENE_FLAGS_INCOMPLETE || !scene->mRootNode) {
+        std::cerr << "Assimp Error: " << importer.GetErrorString() << std::endl;
         return false;
     }
 
-    std::vector<Vec3> temp_vertices;
-    std::string line;
-    while (std::getline(file, line)) {
-        std::istringstream ss(line);
-        std::string tag; ss >> tag;
-        if (tag == "v") {
-            Vec3 v; ss >> v.x >> v.y >> v.z;
-            temp_vertices.push_back(v);
-        } else if (tag == "f"){
-            for (int i = 0; i < 3; ++i) {
-                std::string tok; ss >> tok;
-                if (tok.empty()) break;
-                size_t slash = tok.find('/');
-                int idx = 0;
-                if (slash == std::string::npos) {
-                    idx = std::stoi(tok);
-                }
-                else {
-                    idx = std::stoi(tok.substr(0, slash));
-                }
-                const Vec3& p = temp_vertices[idx - 1];
-                outVertices.push_back(p.x);
-                outVertices.push_back(p.y);
-                outVertices.push_back(p.z);
+    // 1. 取得資料夾與 .fbm 資料夾路徑
+    std::string directory = path.substr(0, path.find_last_of("/\\") + 1);
+    std::string baseName = path.substr(path.find_last_of("/\\") + 1);
+    baseName = baseName.substr(0, baseName.find_last_of("."));
+
+    // 指向 temu2000-2.fbm/
+    std::string fbmPath = directory + baseName + ".fbm/";
+
+    // 2. 處理材質 (貼圖)
+    for (unsigned int i = 0; i < scene->mNumMaterials; i++) {
+        aiMaterial* mat = scene->mMaterials[i];
+        aiString str;
+        if (mat->GetTexture(aiTextureType_DIFFUSE, 0, &str) == AI_SUCCESS) {
+            std::string filename = std::string(str.C_Str());
+
+            // 關鍵：去掉路徑，只拿檔名 (例如 C:\Users\Desktop\Side_View.jpg -> Side_View.jpg)
+            size_t lastSlash = filename.find_last_of("/\\");
+            if (lastSlash != std::string::npos) {
+                filename = filename.substr(lastSlash + 1);
+            }
+
+            // 1. 先找 .fbm 資料夾
+            std::string texPath = fbmPath + filename;
+            int width, height, nrChannels;
+            unsigned char* data = stbi_load(texPath.c_str(), &width, &height, &nrChannels, 0);
+
+            // 2. 如果失敗，再找模型同層目錄
+            if (!data) {
+                texPath = directory + filename;
+                data = stbi_load(texPath.c_str(), &width, &height, &nrChannels, 0);
+            }
+
+            if (data) {
+                std::cout << "貼圖載入成功: " << texPath << std::endl; // 這行很重要，幫你確認路徑
+                GLuint textureID;
+                glGenTextures(1, &textureID);
+                glBindTexture(GL_TEXTURE_2D, textureID);
+                GLenum format = (nrChannels == 4) ? GL_RGBA : GL_RGB;
+                glTexImage2D(GL_TEXTURE_2D, 0, format, width, height, 0, format, GL_UNSIGNED_BYTE, data);
+                glGenerateMipmap(GL_TEXTURE_2D);
+                stbi_image_free(data);
+                materialTextures[i] = textureID;
+            }
+            else {
+                std::cerr << "貼圖載入失敗，找不到檔案: " << filename << std::endl;
             }
         }
     }
-    return !outVertices.empty();
+
+    // 3. 處理節點
+    processNode(scene->mRootNode, scene, meshes);
+    return true;
 }
+
 //上帝視角
 void processInput(GLFWwindow* window, glm::vec3& cameraPos, glm::vec3& cameraFront, glm::vec3& cameraUp)
 {
@@ -120,7 +243,7 @@ struct Mesh {
     int materialID;
 };
 
-// 使用 Win32 Open File dialog（回傳空字串表示取消）
+// 使用 win32 open file dialog（回傳空字串 = 取消）
 std::string OpenFileDialog(const char* filter = "OBJ Files/0*.obj/0All Files/0*.*/0") {
     OPENFILENAMEA ofn;
     CHAR szFile[MAX_PATH] = { 0 };
@@ -152,48 +275,6 @@ bool loadTexturedModel(const std::string& objPath,
 
     // 自動解析 base path
     std::string basePath = objPath.substr(0, objPath.find_last_of("/\\") + 1);
-
-    // 載入 .obj + .mtl
-    bool ret = tinyobj::LoadObj(&attrib, &shapes, &materials, &warn, &err,
-        objPath.c_str(), basePath.c_str(), true, true);
-    if (!ret) {
-        std::cerr << "Failed to load OBJ: " << err << std::endl;
-        std::cerr << "Warning: " << warn << std::endl;
-        return false;
-    }
-
-    // 載入所有材質的貼圖******
-    for (size_t i = 0; i < materials.size(); ++i) {
-        std::string texname = materials[i].diffuse_texname;
-        std::string texturePath;
-
-        if (texname.find(":") != std::string::npos || texname.find("/") == 0 || texname.find("\\") == 0) {
-            texturePath = texname;
-        } else {
-            texturePath = basePath + texname;
-        }
-
-        int width, height, channels;
-        unsigned char* data = stbi_load(texturePath.c_str(), &width, &height, &channels, 0);
-        if (!data) {
-            std::cerr << "Failed to load texture: " << texturePath << std::endl;
-            continue;
-        }
-
-        GLuint texID;
-        glGenTextures(1, &texID);
-        glBindTexture(GL_TEXTURE_2D, texID);
-        GLenum format = (channels == 4) ? GL_RGBA : GL_RGB;
-        glTexImage2D(GL_TEXTURE_2D, 0, format, width, height, 0, format, GL_UNSIGNED_BYTE, data);
-        glGenerateMipmap(GL_TEXTURE_2D);
-        glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_S, GL_REPEAT);
-        glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_T, GL_REPEAT);
-        glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, GL_LINEAR_MIPMAP_LINEAR);
-        glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, GL_LINEAR);
-        stbi_image_free(data);
-
-        materialTextures[i] = texID;
-    }
 
     // 建立每個 shape 的 VAO/VBO
     for (const auto& shape : shapes) {
@@ -241,7 +322,18 @@ bool loadTexturedModel(const std::string& objPath,
 
 bool ctrlO_pressed = false;
 
-int main() {
+void setWorkingDirectoryToExePath() {
+    char buffer[MAX_PATH];
+    GetModuleFileNameA(NULL, buffer, MAX_PATH);
+    std::string::size_type pos = std::string(buffer).find_last_of("\\/");
+    std::string path = std::string(buffer).substr(0, pos);
+    _chdir(path.c_str()); // 將當前工作目錄更改為 exe 所在路徑
+}
+
+int main() 
+{
+
+    setWorkingDirectoryToExePath();
     if (!glfwInit()) {
         std::cerr << "Failed to initialize GLFW\n";
         return -1;
@@ -269,9 +361,11 @@ int main() {
     std::vector<Mesh> meshes;
     std::unordered_map<int, GLuint> materialTextures;
 
-    if (!loadTexturedModel("C:/Users/USER/Downloads/temu2000.mtl.obj", meshes, materialTextures)) {
-        std::cerr << "模型載入失敗！" << std::endl;
-    }
+    //if (!loadFBXModel("./assets/your_model.fbx", meshes, materialTextures)) {
+    //    std::cerr << "FBX 模型載入失敗！" << std::endl;
+    //}
+
+
 
     //頂點著色器
     const char* vertexShaderSource = R"(
@@ -299,7 +393,16 @@ int main() {
     uniform sampler2D texture1;
 
     void main() {
-    FragColor = texture(texture1, TexCoord);
+        vec4 texColor = texture(texture1, TexCoord);
+    
+        // 檢查採樣到的顏色。如果完全是黑的(0,0,0)，代表可能沒讀到貼圖或UV錯了
+        // 我們讓它顯示深灰色，這樣你就知道模型其實在那裡，只是沒貼圖
+        if (texColor.rgb == vec3(0.0, 0.0, 0.0)) {
+            FragColor = vec4(0.3, 0.3, 0.3, 1.0); 
+        } else {
+            // 如果有讀到顏色，稍微增加亮度(1.2倍)讓你比較好觀察細節
+            FragColor = texColor * 1.2; 
+        }
     }
     )";
     
@@ -352,30 +455,26 @@ int main() {
     while (!glfwWindowShouldClose(window)) {
         processInput(window, cameraPos, cameraFront, cameraup);
         glClear(GL_COLOR_BUFFER_BIT | GL_DEPTH_BUFFER_BIT);
-        glUseProgram(shaderProgram);   // 使用我們的 shader program
+        glUseProgram(shaderProgram);   // 使用shader program
         
-        int ctrlState = glfwGetKey(window, GLFW_KEY_LEFT_CONTROL) == GLFW_PRESS || glfwGetKey(window, GLFW_KEY_RIGHT_CONTROL) == GLFW_PRESS;
-        int oState = glfwGetKey(window, GLFW_KEY_O) == GLFW_PRESS;
+        // 偵測按鍵狀態
+        int ctrl = glfwGetKey(window, GLFW_KEY_LEFT_CONTROL) == GLFW_PRESS || glfwGetKey(window, GLFW_KEY_RIGHT_CONTROL) == GLFW_PRESS;
+        int oKey = glfwGetKey(window, GLFW_KEY_O) == GLFW_PRESS;
 
-        if (ctrlState && oState && !ctrlO_pressed) {
+        if (ctrl && oKey && !ctrlO_pressed)
+        {
             ctrlO_pressed = true;
+            std::string path = OpenFileDialog("Model Files\0*.fbx;*.obj\0All Files\0*.*\0");
+            if (!path.empty())
+            {
+                meshes.clear();
+                materialTextures.clear();
 
-            // 彈出檔案選擇對話框（同步）
-            std::string path = OpenFileDialog("OBJ Files/0*.obj/0All Files/0*.*/0");
-            if (!path.empty()) {
-                std::cout << "Trying to load: " << path << std::endl;
-
-                // 把新模型 append 到 scenes（loadTexturedModel 已經會 push_back mesh）
-                if (!loadTexturedModel(path, meshes, materialTextures)) {
-                    std::cerr << "Failed to load model: " << path << std::endl;
-                }
-                else {
-                    std::cout << "Model loaded and appended to scene: " << path << std::endl;
-                }
+                // 統一交給 Assimp 處理，它會自動偵測是 FBX
+                loadFBXModel(path, meshes, materialTextures);
             }
         }
-        // release debounce when O released
-        if (!oState) ctrlO_pressed = false;
+        if (!oKey) ctrlO_pressed = false;
 
         glm::mat4 model = glm::mat4(1.0f);
         glm::mat4 view = glm::lookAt(cameraPos, cameraPos + cameraFront, cameraup);
